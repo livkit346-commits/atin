@@ -48,7 +48,7 @@ class AtinApp extends StatelessWidget {
               surface: Colors.white,
             ),
             scaffoldBackgroundColor: const Color(0xFFF6F8FA),
-            cardTheme: const CardTheme(
+            cardTheme: const CardThemeData(
               color: Colors.white,
               elevation: 2,
             ),
@@ -71,7 +71,7 @@ class AtinApp extends StatelessWidget {
               surface: const Color(0xFF1E1E1E),
             ),
             scaffoldBackgroundColor: const Color(0xFF121212),
-            cardTheme: const CardTheme(
+            cardTheme: const CardThemeData(
               color: Color(0xFF1E1E1E),
               elevation: 4,
             ),
@@ -449,7 +449,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   if (_availableOrgs.isEmpty)
                     const Padding(
                       padding: EdgeInsets.all(16.0),
-                      child: Text('No groups available to join yet.', style: TextStyle(color: Colors.grey, textAlign: TextAlign.center)),
+                      child: const Text('No groups available to join yet.', style: TextStyle(color: Colors.grey), textAlign: TextAlign.center),
                     )
                   else
                     ..._availableOrgs.map((org) {
@@ -611,18 +611,24 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         .from('attendance_sessions')
         .stream(primaryKey: ['id'])
         .eq('organization_id', widget.organization['id'])
-        .eq('is_active', true)
         .listen((data) {
           if (data.isNotEmpty) {
-            final now = DateTime.now();
-            final expires = DateTime.parse(data.first['expires_at']);
-            if (expires.isAfter(now)) {
-              setState(() {
-                _activeSession = data.first;
-              });
-              _runRangeChecks();
-              _checkExistingAttendance();
-              return;
+            // Find active session from stream data in Dart side to avoid multi-filter limitations
+            final active = data.firstWhere(
+              (item) => item['is_active'] == true,
+              orElse: () => null,
+            );
+            if (active != null) {
+              final now = DateTime.now();
+              final expires = DateTime.parse(active['expires_at']);
+              if (expires.isAfter(now)) {
+                setState(() {
+                  _activeSession = active;
+                });
+                _runRangeChecks();
+                _checkExistingAttendance();
+                return;
+              }
             }
           }
           setState(() {
