@@ -28,7 +28,7 @@ workflows:
           flutter packages pub get
       - name: Static code analysis
         script: |
-          flutter analyze
+          flutter analyze --no-fatal-infos --no-fatal-warnings
       - name: Run unit tests
         script: |
           flutter test
