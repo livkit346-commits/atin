@@ -612,23 +612,23 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         .stream(primaryKey: ['id'])
         .eq('organization_id', widget.organization['id'])
         .listen((data) {
-          if (data.isNotEmpty) {
-            // Find active session from stream data in Dart side to avoid multi-filter limitations
-            final active = data.firstWhere(
-              (item) => item['is_active'] == true,
-              orElse: () => null,
-            );
-            if (active != null) {
-              final now = DateTime.now();
-              final expires = DateTime.parse(active['expires_at']);
-              if (expires.isAfter(now)) {
-                setState(() {
-                  _activeSession = active;
-                });
-                _runRangeChecks();
-                _checkExistingAttendance();
-                return;
-              }
+          Map<String, dynamic>? active;
+          for (final item in data) {
+            if (item['is_active'] == true) {
+              active = item;
+              break;
+            }
+          }
+          if (active != null) {
+            final now = DateTime.now();
+            final expires = DateTime.parse(active['expires_at']);
+            if (expires.isAfter(now)) {
+              setState(() {
+                _activeSession = active;
+              });
+              _runRangeChecks();
+              _checkExistingAttendance();
+              return;
             }
           }
           setState(() {
