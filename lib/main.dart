@@ -127,6 +127,7 @@ class _AuthScreenState extends State<AuthScreen> {
   
   bool _isSignUp = false;
   bool _isLoading = false;
+  bool _obscurePassword = true;
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
@@ -250,8 +251,15 @@ class _AuthScreenState extends State<AuthScreen> {
                     const SizedBox(height: 12),
                     TextFormField(
                       controller: _passwordController,
-                      decoration: const InputDecoration(labelText: 'Password', prefixIcon: Icon(Icons.lock)),
-                      obscureText: true,
+                      decoration: InputDecoration(
+                        labelText: 'Password',
+                        prefixIcon: const Icon(Icons.lock),
+                        suffixIcon: IconButton(
+                          icon: Icon(_obscurePassword ? Icons.visibility : Icons.visibility_off),
+                          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                        ),
+                      ),
+                      obscureText: _obscurePassword,
                       validator: (v) => v == null || v.length < 6 ? 'Password must be 6+ chars' : null,
                     ),
                     const SizedBox(height: 24),
