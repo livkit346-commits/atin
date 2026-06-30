@@ -1,0 +1,71 @@
+# Codemagic CI/CD configuration for Atin Attendance App
+workflows:
+  android-release:
+    name: Android Release Build
+    max_build_duration: 30
+    instance_type: mac_mini_m1
+    environment:
+      groups:
+        - keystore_credentials # For signing if configured in Codemagic UI
+      vars:
+        PACKAGE_NAME: "com.atin.app"
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: 'main'
+          include: true
+          source: true
+    scripts:
+      - name: Set up local.properties
+        script: |
+          echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
+      - name: Get Flutter dependencies
+        script: |
+          flutter packages pub get
+      - name: Static code analysis
+        script: |
+          flutter analyze
+      - name: Run unit tests
+        script: |
+          flutter test
+      - name: Build Android Release APK
+        script: |
+          flutter build apk --release --build-name=1.0.0 --build-number=$BUILD_NUMBER
+      - name: Build Android App Bundle (AAB)
+        script: |
+          flutter build appbundle --release --build-name=1.0.0 --build-number=$BUILD_NUMBER
+    artifacts:
+      - build/app/outputs/flutter-apk/*.apk
+      - build/app/outputs/bundle/release/*.aab
+
+  ios-debug:
+    name: iOS Debug Build
+    max_build_duration: 30
+    instance_type: mac_mini_m1
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: 'main'
+          include: true
+          source: true
+    scripts:
+      - name: Get Flutter dependencies
+        script: |
+          flutter packages pub get
+      - name: Install CocoaPods dependencies
+        script: |
+          find . -name "Podfile" -execdir pod install \;
+      - name: Build iOS Debug IPA
+        script: |
+          flutter build ipa --debug --no-codesign
+    artifacts:
+      - build/ios/ipa/*.ipa
