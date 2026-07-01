@@ -472,7 +472,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                           ),
                         ),
                       );
-                    }).toList(),
+                    }),
                 ],
               ),
             ),
@@ -702,12 +702,10 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         return;
       }
       
-      // Perform hardware range checks dynamically
       await _runRangeChecks();
       
       final bool withinRange = _inGpsRange && _inBleRange;
       if (withinRange) {
-        // Still in location range, update heartbeat seen timestamp
         try {
           await supabase.from('attendances').update({
             'last_seen': DateTime.now().toIso8601String(),
@@ -938,7 +936,7 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
                   backgroundColor: Theme.of(context).colorScheme.primary,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 16),
-                  disabledBackgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.3),
+                  disabledBackgroundColor: Theme.of(context).colorScheme.primary.withAlpha(76),
                 ),
               ),
           ],
@@ -1013,9 +1011,6 @@ class StudentHistoryTab extends StatelessWidget {
               }
               
               if (now.isAfter(sessionEndTimeToday)) {
-                // If they never checked out and left the location before it ended:
-                // lastSeen represents the exact latest moment they were in range.
-                // We check if lastSeen is before the session end time.
                 if (lastSeenTime.isBefore(sessionEndTimeToday)) {
                   checkOutTime = lastSeenTime;
                   isLastSeenOut = true;
@@ -1037,7 +1032,7 @@ class StudentHistoryTab extends StatelessWidget {
               margin: const EdgeInsets.only(bottom: 12.0),
               child: ListTile(
                 leading: CircleAvatar(
-                  backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.2),
+                  backgroundColor: Theme.of(context).colorScheme.primary.withAlpha(51),
                   child: Icon(Icons.check, color: Theme.of(context).colorScheme.primary),
                 ),
                 title: Text(session['title'] ?? 'Session', style: const TextStyle(fontWeight: FontWeight.bold)),
@@ -1187,7 +1182,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     super.initState();
     _tabs = [
       AdminConsoleTab(adminName: widget.adminName, organization: widget.organization),
-      const AdminReportsTab(),
+      AdminReportsTab(organization: widget.organization),
       AdminMembersTab(organization: widget.organization),
     ];
   }
@@ -1536,7 +1531,7 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
             ),
           ] else ...[
             Card(
-              color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
+              color: Theme.of(context).colorScheme.primary.withAlpha(26),
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
                 child: Column(
@@ -1675,24 +1670,61 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
 }
 
 class AdminReportsTab extends StatefulWidget {
-  const AdminReportsTab({super.key});
+  final Map<String, dynamic> organization;
+  const AdminReportsTab({super.key, required this.organization});
 
   @override
   State<AdminReportsTab> createState() => _AdminReportsTabState();
 }
 
 class _AdminReportsTabState extends State<AdminReportsTab> {
-  Future<List<dynamic>> _fetchSessions() async {
-    final user = supabase.auth.currentUser;
-    final response = await supabase
-        .from('attendance_sessions')
-        .select('*, attendances(count)')
-        .eq('admin_id', user!.id)
-        .order('created_at', ascending: false);
-    return response as List<dynamic>;
+  bool _isExcelMode = true;
+  bool _loading = true;
+  List<dynamic> _sessions = [];
+  List<dynamic> _members = [];
+  List<dynamic> _attendances = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchReportData();
   }
 
-  void _showSessionDetails(BuildContext context, Map<String, dynamic> session) async {
+  Future<void> _fetchReportData() async {
+    setState(() => _loading = true);
+    try {
+      // 1. Fetch all sessions in the organization
+      final sessionsRes = await supabase
+          .from('attendance_sessions')
+          .select('*, attendances(count)')
+          .eq('organization_id', widget.organization['id'])
+          .order('created_at', ascending: false);
+
+      // 2. Fetch all members in the organization
+      final membersRes = await supabase
+          .from('organization_members')
+          .select('*, profiles(*)')
+          .eq('organization_id', widget.organization['id'])
+          .eq('role', 'member');
+
+      // 3. Fetch all attendances for the organization's sessions
+      final attendancesRes = await supabase
+          .from('attendances')
+          .select('*, profiles(*)');
+
+      setState(() {
+        _sessions = sessionsRes as List<dynamic>;
+        _members = membersRes as List<dynamic>;
+        _attendances = attendancesRes as List<dynamic>;
+        _loading = false;
+      });
+    } catch (e) {
+      setState(() => _loading = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load reports: $e'), backgroundColor: Colors.redAccent));
+    }
+  }
+
+  void _showSessionDetails(BuildContext context, Map<String, dynamic> session) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1702,104 +1734,93 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
           maxChildSize: 0.9,
           expand: false,
           builder: (_, scrollController) {
-            return FutureBuilder<List<dynamic>>(
-              future: supabase
-                  .from('attendances')
-                  .select('check_in, check_out, last_seen, profiles(*)')
-                  .eq('session_id', session['id']),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final list = snapshot.data ?? [];
-                return Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(session['title'] ?? 'Session Details', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 4),
-                      Text('Method: ${session['auth_type'].toString().toUpperCase()}', style: const TextStyle(color: Colors.grey)),
-                      const Divider(height: 24),
-                      Text('Students Present (${list.length})', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 12),
-                      Expanded(
-                        child: list.isEmpty
-                            ? const Center(child: Text('No students checked in.', style: TextStyle(color: Colors.grey)))
-                            : ListView.builder(
-                                controller: scrollController,
-                                itemCount: list.length,
-                                itemBuilder: (context, idx) {
-                                  final attendee = list[idx];
-                                  final profile = attendee['profiles'] as Map<String, dynamic>;
-                                  final inTime = DateTime.parse(attendee['check_in']).toLocal();
-                                  final outTimeRaw = attendee['check_out'];
-                                  final lastSeenTime = DateTime.parse(attendee['last_seen']).toLocal();
-                                  
-                                  DateTime? outTime;
-                                  bool autoOut = false;
-                                  bool lastSeenOut = false;
-                                  if (outTimeRaw != null) {
-                                    outTime = DateTime.parse(outTimeRaw).toLocal();
+            final list = _attendances.where((a) => a['session_id'] == session['id']).toList();
+            return Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(session['title'] ?? 'Session Details', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
+                  Text('Method: ${session['auth_type'].toString().toUpperCase()}', style: const TextStyle(color: Colors.grey)),
+                  const Divider(height: 24),
+                  Text('Students Present (${list.length})', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: list.isEmpty
+                        ? const Center(child: Text('No students checked in.', style: TextStyle(color: Colors.grey)))
+                        : ListView.builder(
+                            controller: scrollController,
+                            itemCount: list.length,
+                            itemBuilder: (context, idx) {
+                              final attendee = list[idx];
+                              final profile = attendee['profiles'] as Map<String, dynamic>;
+                              final inTime = DateTime.parse(attendee['check_in']).toLocal();
+                              final outTimeRaw = attendee['check_out'];
+                              final lastSeenTime = DateTime.parse(attendee['last_seen']).toLocal();
+                              
+                              DateTime? outTime;
+                              bool autoOut = false;
+                              bool lastSeenOut = false;
+                              if (outTimeRaw != null) {
+                                outTime = DateTime.parse(outTimeRaw).toLocal();
+                              } else {
+                                final now = DateTime.now();
+                                DateTime limit;
+                                if (session['is_recurring'] == true) {
+                                  final endParts = session['daily_end_time'].split(':');
+                                  final endH = int.parse(endParts[0]);
+                                  final endM = int.parse(endParts[1]);
+                                  limit = DateTime(inTime.year, inTime.month, inTime.day, endH, endM);
+                                } else {
+                                  limit = DateTime.parse(session['expires_at']).toLocal();
+                                }
+                                
+                                if (now.isAfter(limit)) {
+                                  if (lastSeenTime.isBefore(limit)) {
+                                    outTime = lastSeenTime;
+                                    lastSeenOut = true;
                                   } else {
-                                    final now = DateTime.now();
-                                    DateTime limit;
-                                    if (session['is_recurring'] == true) {
-                                      final endParts = session['daily_end_time'].split(':');
-                                      final endH = int.parse(endParts[0]);
-                                      final endM = int.parse(endParts[1]);
-                                      limit = DateTime(inTime.year, inTime.month, inTime.day, endH, endM);
-                                    } else {
-                                      limit = DateTime.parse(session['expires_at']).toLocal();
-                                    }
-                                    
-                                    if (now.isAfter(limit)) {
-                                      if (lastSeenTime.isBefore(limit)) {
-                                        outTime = lastSeenTime;
-                                        lastSeenOut = true;
-                                      } else {
-                                        outTime = limit;
-                                        autoOut = true;
-                                      }
-                                    }
+                                    outTime = limit;
+                                    autoOut = true;
                                   }
+                                }
+                              }
 
-                                  String infoSuffix = '';
-                                  Color txtColor = Theme.of(context).colorScheme.primary;
-                                  if (outTime != null) {
-                                    if (lastSeenOut) {
-                                      txtColor = Colors.orangeAccent;
-                                      infoSuffix = ' | Left Location: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
-                                    } else if (autoOut) {
-                                      txtColor = Colors.orange;
-                                      infoSuffix = ' | Auto Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
-                                    } else {
-                                      infoSuffix = ' | Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
-                                    }
-                                  }
+                              String infoSuffix = '';
+                              Color txtColor = Theme.of(context).colorScheme.primary;
+                              if (outTime != null) {
+                                if (lastSeenOut) {
+                                  txtColor = Colors.orangeAccent;
+                                  infoSuffix = ' | Left Location: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
+                                } else if (autoOut) {
+                                  txtColor = Colors.orange;
+                                  infoSuffix = ' | Auto Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
+                                } else {
+                                  infoSuffix = ' | Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
+                                }
+                              }
 
-                                  return Card(
-                                    margin: const EdgeInsets.only(bottom: 8.0),
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(12.0),
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          Text(profile['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold)),
-                                          Text('Email: ${profile['email'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                          Text('Gender: ${profile['gender'] ?? ''} • Dept: ${profile['department'] ?? ''} • Level: ${profile['level'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                          Text('In: ${inTime.hour}:${inTime.minute.toString().padLeft(2, '0')}$infoSuffix', style: TextStyle(color: txtColor, fontSize: 12)),
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
+                              return Card(
+                                margin: const EdgeInsets.only(bottom: 8.0),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12.0),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(profile['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                      Text('Email: ${profile['email'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                      Text('Gender: ${profile['gender'] ?? ''} • Dept: ${profile['department'] ?? ''} • Level: ${profile['level'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                                      Text('In: ${inTime.hour}:${inTime.minute.toString().padLeft(2, '0')}$infoSuffix', style: TextStyle(color: txtColor, fontSize: 12)),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                   ),
-                );
-              },
+                ],
+              ),
             );
           },
         );
@@ -1809,63 +1830,230 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<dynamic>>(
-      future: _fetchSessions(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError || !snapshot.hasData || snapshot.data!.isEmpty) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: const [
-                Icon(Icons.analytics_outlined, size: 64, color: Colors.grey),
-                SizedBox(height: 16),
-                Text('No past sessions to report.', style: TextStyle(color: Colors.grey)),
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Reports', style: TextStyle(fontSize: 18)),
+        actions: [
+          IconButton(
+            icon: Icon(_isExcelMode ? Icons.list : Icons.grid_on, color: Theme.of(context).colorScheme.primary),
+            tooltip: _isExcelMode ? 'Switch to List View' : 'Switch to Excel View',
+            onPressed: () => setState(() => _isExcelMode = !_isExcelMode),
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _fetchReportData,
+          ),
+        ],
+      ),
+      body: _sessions.isEmpty
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const [
+                  Icon(Icons.analytics_outlined, size: 64, color: Colors.grey),
+                  SizedBox(height: 16),
+                  Text('No past sessions to report.', style: TextStyle(color: Colors.grey)),
+                ],
+              ),
+            )
+          : _isExcelMode
+              ? _buildExcelReport()
+              : _buildListReport(),
+    );
+  }
+
+  Widget _buildListReport() {
+    return ListView.builder(
+      padding: const EdgeInsets.all(16.0),
+      itemCount: _sessions.length,
+      itemBuilder: (context, index) {
+        final s = _sessions[index];
+        final created = DateTime.parse(s['created_at']).toLocal();
+        final count = s['attendances'] != null && s['attendances'].isNotEmpty
+            ? s['attendances'][0]['count']
+            : 0;
+
+        return Card(
+          margin: const EdgeInsets.only(bottom: 12.0),
+          child: ListTile(
+            leading: CircleAvatar(
+              backgroundColor: Theme.of(context).colorScheme.primary.withAlpha(51),
+              child: Icon(Icons.school, color: Theme.of(context).colorScheme.primary),
+            ),
+            title: Text(s['title'] ?? 'Session', style: const TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text(
+              s['is_recurring'] == true
+                  ? 'Recurring: Mon-Fri (${s['daily_start_time']} - ${s['daily_end_time']})'
+                  : 'Date: ${created.year}-${created.month.toString().padLeft(2, '0')}-${created.day.toString().padLeft(2, '0')} (${DateTime.parse(s['start_time']).toLocal().hour}:${DateTime.parse(s['start_time']).toLocal().minute.toString().padLeft(2, '0')} - ${DateTime.parse(s['expires_at']).toLocal().hour}:${DateTime.parse(s['expires_at']).toLocal().minute.toString().padLeft(2, '0')})'
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('$count Attended', style: TextStyle(fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
+                const SizedBox(width: 8),
+                const Icon(Icons.chevron_right, size: 20),
               ],
             ),
-          );
-        }
-
-        final sessions = snapshot.data!;
-        return ListView.builder(
-          padding: const EdgeInsets.all(16.0),
-          itemCount: sessions.length,
-          itemBuilder: (context, index) {
-            final s = sessions[index];
-            final created = DateTime.parse(s['created_at']).toLocal();
-            final count = s['attendances'] != null && s['attendances'].isNotEmpty
-                ? s['attendances'][0]['count']
-                : 0;
-
-            return Card(
-              margin: const EdgeInsets.only(bottom: 12.0),
-              child: ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: Theme.of(context).colorScheme.primary.withOpacity(0.2),
-                  child: Icon(Icons.school, color: Theme.of(context).colorScheme.primary),
-                ),
-                title: Text(s['title'] ?? 'Session', style: const TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: Text(
-                  s['is_recurring'] == true
-                      ? 'Recurring: Mon-Fri (${s['daily_start_time']} - ${s['daily_end_time']})'
-                      : 'Date: ${created.year}-${created.month.toString().padLeft(2, '0')}-${created.day.toString().padLeft(2, '0')} (${DateTime.parse(s['start_time']).toLocal().hour}:${DateTime.parse(s['start_time']).toLocal().minute.toString().padLeft(2, '0')} - ${DateTime.parse(s['expires_at']).toLocal().hour}:${DateTime.parse(s['expires_at']).toLocal().minute.toString().padLeft(2, '0')})'
-                ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('$count Attended', style: TextStyle(fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
-                    const SizedBox(width: 8),
-                    const Icon(Icons.chevron_right, size: 20),
-                  ],
-                ),
-                onTap: () => _showSessionDetails(context, s),
-              ),
-            );
-          },
+            onTap: () => _showSessionDetails(context, s),
+          ),
         );
       },
+    );
+  }
+
+  Widget _buildExcelReport() {
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Card(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              color: Theme.of(context).colorScheme.primary.withAlpha(26),
+              child: Row(
+                children: const [
+                  Icon(Icons.table_chart, size: 20, color: Colors.blueAccent),
+                  SizedBox(width: 8),
+                  Text(
+                    'Atin Attendance Spreadsheet Matrix',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: _members.isEmpty
+                  ? const Center(child: Text('No students joined this group yet.', style: TextStyle(color: Colors.grey)))
+                  : SingleChildScrollView(
+                      scrollDirection: Axis.vertical,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: DataTable(
+                          columnSpacing: 24,
+                          headingRowHeight: 48,
+                          dataRowMinHeight: 48,
+                          dataRowMaxHeight: 52,
+                          headingRowColor: MaterialStateProperty.all(
+                            Theme.of(context).colorScheme.primary.withAlpha(12),
+                          ),
+                          border: TableBorder.all(
+                            color: Theme.of(context).dividerColor.withAlpha(51),
+                            width: 1,
+                          ),
+                          columns: [
+                            const DataColumn(
+                              label: Text(
+                                'Student Name',
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                              ),
+                            ),
+                            ..._sessions.map((session) {
+                              return DataColumn(
+                                label: Text(
+                                  session['title'] ?? 'Session',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                ),
+                              );
+                            }),
+                          ],
+                          rows: _members.map((member) {
+                            final profile = member['profiles'] as Map<String, dynamic>;
+                            final studentId = member['user_id'];
+                            return DataRow(
+                              cells: [
+                                DataCell(
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Text(
+                                        profile['name'] ?? 'Unknown',
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      ),
+                                      Text(
+                                        profile['email'] ?? '',
+                                        style: const TextStyle(fontSize: 10, color: Colors.grey),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                ..._sessions.map((session) {
+                                  // Check attendance for this specific student and session
+                                  final attendance = _attendances.firstWhere(
+                                    (a) => a['student_id'] == studentId && a['session_id'] == session['id'],
+                                    orElse: () => null,
+                                  );
+
+                                  if (attendance != null) {
+                                    final checkInTime = DateTime.parse(attendance['check_in']).toLocal();
+                                    final timeStr = '${checkInTime.hour}:${checkInTime.minute.toString().padLeft(2, '0')}';
+                                    return DataCell(
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                                        decoration: BoxDecoration(
+                                          color: Colors.green.withAlpha(26),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            const Icon(Icons.check_circle, color: Colors.greenAccent, size: 14),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              timeStr,
+                                              style: const TextStyle(
+                                                color: Colors.greenAccent,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  } else {
+                                    return DataCell(
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                                        decoration: BoxDecoration(
+                                          color: Colors.red.withAlpha(26),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: const [
+                                            Icon(Icons.cancel, color: Colors.redAccent, size: 14),
+                                            SizedBox(width: 4),
+                                            Text(
+                                              'Absent',
+                                              style: TextStyle(
+                                                color: Colors.redAccent,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 11,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                }),
+                              ],
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
