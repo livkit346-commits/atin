@@ -621,29 +621,50 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         .eq('organization_id', widget.organization['id'])
         .listen((data) {
           Map<String, dynamic>? active;
+          final now = DateTime.now();
+
           for (final item in data) {
             if (item['is_active'] == true) {
-              active = item;
-              break;
+              if (item['is_recurring'] == true) {
+                // Check if working day (Mon - Fri)
+                if (now.weekday >= 1 && now.weekday <= 5) {
+                  // Check daily time window
+                  final currentMinutes = now.hour * 60 + now.minute;
+                  final startParts = item['daily_start_time'].split(':');
+                  final startMinutes = int.parse(startParts[0]) * 60 + int.parse(startParts[1]);
+                  final endParts = item['daily_end_time'].split(':');
+                  final endMinutes = int.parse(endParts[0]) * 60 + int.parse(endParts[1]);
+
+                  if (currentMinutes >= startMinutes && currentMinutes <= endMinutes) {
+                    active = item;
+                    break;
+                  }
+                }
+              } else {
+                // One-time session
+                final start = DateTime.parse(item['start_time']);
+                final expires = DateTime.parse(item['expires_at']);
+                if (now.isAfter(start) && now.isBefore(expires)) {
+                  active = item;
+                  break;
+                }
+              }
             }
           }
+
           if (active != null) {
-            final now = DateTime.now();
-            final expires = DateTime.parse(active['expires_at']);
-            if (expires.isAfter(now)) {
-              setState(() {
-                _activeSession = active;
-              });
-              _runRangeChecks();
-              _checkExistingAttendance();
-              return;
-            }
+            setState(() {
+              _activeSession = active;
+            });
+            _runRangeChecks();
+            _checkExistingAttendance();
+          } else {
+            setState(() {
+              _activeSession = null;
+              _inGpsRange = false;
+              _inBleRange = false;
+            });
           }
-          setState(() {
-            _activeSession = null;
-            _inGpsRange = false;
-            _inBleRange = false;
-          });
         });
   }
 
@@ -655,6 +676,7 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         .select()
         .eq('student_id', user!.id)
         .eq('session_id', _activeSession!['id'])
+        .eq('date', DateTime.now().toIso8601String().substring(0, 10))
         .maybeSingle();
 
     if (res != null) {
@@ -826,6 +848,10 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
                     Text(_activeSession!['title'], style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.primary)),
                     const SizedBox(height: 8),
                     Text('Verification Method: ${_activeSession!['auth_type'].toString().toUpperCase()}', style: const TextStyle(color: Colors.grey)),
+                    if (_activeSession!['is_recurring'] == true) ...[
+                      const SizedBox(height: 4),
+                      Text('Recurring Schedule: Mon-Fri (${_activeSession!['daily_start_time']} to ${_activeSession!['daily_end_time']})', style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)),
+                    ],
                     const Divider(height: 32),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -894,7 +920,7 @@ class StudentHistoryTab extends StatelessWidget {
     final user = supabase.auth.currentUser;
     final response = await supabase
         .from('attendances')
-        .select('*, attendance_sessions(title, auth_type)')
+        .select('*, attendance_sessions(*)')
         .eq('student_id', user!.id)
         .order('check_in', ascending: false);
     return response as List<dynamic>;
@@ -930,7 +956,33 @@ class StudentHistoryTab extends StatelessWidget {
             final session = log['attendance_sessions'] as Map<String, dynamic>;
             final checkInTime = DateTime.parse(log['check_in']).toLocal();
             final checkOutTimeRaw = log['check_out'];
-            final checkOutTime = checkOutTimeRaw != null ? DateTime.parse(checkOutTimeRaw).toLocal() : null;
+            
+            DateTime? checkOutTime;
+            bool isAutoCheckedOut = false;
+            
+            if (checkOutTimeRaw != null) {
+              checkOutTime = DateTime.parse(checkOutTimeRaw).toLocal();
+            } else {
+              // Calculate Auto Check-out if session active time has expired for that day
+              final now = DateTime.now();
+              if (session['is_recurring'] == true) {
+                final endParts = session['daily_end_time'].split(':');
+                final endHour = int.parse(endParts[0]);
+                final endMin = int.parse(endParts[1]);
+                
+                final sessionEndTimeToday = DateTime(checkInTime.year, checkInTime.month, checkInTime.day, endHour, endMin);
+                if (now.isAfter(sessionEndTimeToday)) {
+                  checkOutTime = sessionEndTimeToday;
+                  isAutoCheckedOut = true;
+                }
+              } else {
+                final expires = DateTime.parse(session['expires_at']).toLocal();
+                if (now.isAfter(expires)) {
+                  checkOutTime = expires;
+                  isAutoCheckedOut = true;
+                }
+              }
+            }
 
             return Card(
               margin: const EdgeInsets.only(bottom: 12.0),
@@ -947,15 +999,20 @@ class StudentHistoryTab extends StatelessWidget {
                     Text('Date: ${log['date']}'),
                     Text('Check In: ${checkInTime.hour}:${checkInTime.minute.toString().padLeft(2, '0')}'),
                     if (checkOutTime != null)
-                      Text('Check Out: ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}', style: const TextStyle(color: Colors.blueGrey))
+                      Text(
+                        isAutoCheckedOut 
+                            ? 'Auto Checked Out: ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}'
+                            : 'Check Out: ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}', 
+                        style: TextStyle(color: isAutoCheckedOut ? Colors.orangeAccent : Colors.blueGrey, fontWeight: isAutoCheckedOut ? FontWeight.bold : FontWeight.normal)
+                      )
                     else
                       const Text('Check Out: Pending', style: TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold)),
                   ],
                 ),
                 trailing: Text(
-                  checkOutTime != null ? 'Completed' : 'Active',
+                  checkOutTime != null ? (isAutoCheckedOut ? 'Auto Closed' : 'Completed') : 'Active',
                   style: TextStyle(
-                    color: checkOutTime != null ? Colors.greenAccent : Colors.orangeAccent,
+                    color: checkOutTime != null ? (isAutoCheckedOut ? Colors.orange : Colors.greenAccent) : Colors.orangeAccent,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -1130,7 +1187,12 @@ class AdminConsoleTab extends StatefulWidget {
 class _AdminConsoleTabState extends State<AdminConsoleTab> {
   final _titleController = TextEditingController();
   String _authType = 'gps';
-  int _duration = 60;
+  
+  // Scheduling States
+  bool _isRecurring = false;
+  TimeOfDay _startTime = const TimeOfDay(hour: 8, minute: 0);
+  TimeOfDay _endTime = const TimeOfDay(hour: 17, minute: 0);
+
   bool _isPublishing = false;
   Map<String, dynamic>? _activeSession;
   List<dynamic> _attendees = [];
@@ -1161,15 +1223,23 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
         .maybeSingle();
 
     if (res != null) {
-      final expires = DateTime.parse(res['expires_at']);
-      if (expires.isAfter(DateTime.now())) {
+      if (res['is_recurring'] == true) {
         setState(() {
           _activeSession = res;
         });
         _startBroadcastingIfNeeded();
         _startAttendeePolling();
       } else {
-        await supabase.from('attendance_sessions').update({'is_active': false}).eq('id', res['id']);
+        final expires = DateTime.parse(res['expires_at']);
+        if (expires.isAfter(DateTime.now())) {
+          setState(() {
+            _activeSession = res;
+          });
+          _startBroadcastingIfNeeded();
+          _startAttendeePolling();
+        } else {
+          await supabase.from('attendance_sessions').update({'is_active': false}).eq('id', res['id']);
+        }
       }
     }
   }
@@ -1209,6 +1279,22 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
     await blePeripheral.stop();
   }
 
+  Future<void> _pickTime(bool isStart) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: isStart ? _startTime : _endTime,
+    );
+    if (picked != null) {
+      setState(() {
+        if (isStart) {
+          _startTime = picked;
+        } else {
+          _endTime = picked;
+        }
+      });
+    }
+  }
+
   Future<void> _startSession() async {
     if (_titleController.text.trim().isEmpty) return;
     setState(() => _isPublishing = true);
@@ -1246,7 +1332,25 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
         bleUuid = const Uuid().v4();
       }
 
-      final expires = DateTime.now().add(Duration(minutes: _duration));
+      DateTime startTime;
+      DateTime expiresTime;
+      String? dailyStart;
+      String? dailyEnd;
+
+      final now = DateTime.now();
+
+      if (_isRecurring) {
+        dailyStart = '${_startTime.hour.toString().padLeft(2, '0')}:${_startTime.minute.toString().padLeft(2, '0')}';
+        dailyEnd = '${_endTime.hour.toString().padLeft(2, '0')}:${_endTime.minute.toString().padLeft(2, '0')}';
+        startTime = now;
+        expiresTime = now.add(const Duration(days: 365)); // 1 year duration
+      } else {
+        startTime = DateTime(now.year, now.month, now.day, _startTime.hour, _startTime.minute);
+        expiresTime = DateTime(now.year, now.month, now.day, _endTime.hour, _endTime.minute);
+        if (expiresTime.isBefore(startTime)) {
+          expiresTime = expiresTime.add(const Duration(days: 1)); // Next day
+        }
+      }
 
       final res = await supabase.from('attendance_sessions').insert({
         'organization_id': widget.organization['id'],
@@ -1256,7 +1360,11 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
         'latitude': lat,
         'longitude': lng,
         'ble_uuid': bleUuid,
-        'expires_at': expires.toIso8601String(),
+        'is_recurring': _isRecurring,
+        'daily_start_time': dailyStart,
+        'daily_end_time': dailyEnd,
+        'start_time': startTime.toIso8601String(),
+        'expires_at': expiresTime.toIso8601String(),
         'is_active': true,
       }).select().single();
 
@@ -1323,19 +1431,38 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                       ],
                       onChanged: (val) => setState(() => _authType = val!),
                     ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<int>(
-                      value: _duration,
-                      decoration: const InputDecoration(labelText: 'Duration'),
-                      items: const [
-                        DropdownMenuItem(value: 15, child: Text('15 Minutes')),
-                        DropdownMenuItem(value: 30, child: Text('30 Minutes')),
-                        DropdownMenuItem(value: 60, child: Text('1 Hour')),
-                        DropdownMenuItem(value: 180, child: Text('3 Hours')),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Repeat Every Working Day (Mon-Fri)', style: TextStyle(fontWeight: FontWeight.bold)),
+                        Switch(
+                          value: _isRecurring,
+                          onChanged: (val) => setState(() => _isRecurring = val),
+                        ),
                       ],
-                      onChanged: (val) => setState(() => _duration = val!),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () => _pickTime(true),
+                            icon: const Icon(Icons.access_time),
+                            label: Text('Starts: ${_startTime.format(context)}'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () => _pickTime(false),
+                            icon: const Icon(Icons.av_timer),
+                            label: Text('Ends: ${_endTime.format(context)}'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
                     _isPublishing
                         ? const Center(child: CircularProgressIndicator())
                         : ElevatedButton(
@@ -1377,9 +1504,12 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                     ),
                     const SizedBox(height: 8),
                     Text('Method: ${_activeSession!['auth_type'].toString().toUpperCase()}', style: const TextStyle(color: Colors.grey)),
-                    if (_activeSession!['ble_uuid'] != null) ...[
+                    if (_activeSession!['is_recurring'] == true) ...[
                       const SizedBox(height: 4),
-                      Text('BLE Beacon UUID: ${_activeSession!['ble_uuid']}', style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                      Text('Recurring: Mon-Fri (${_activeSession!['daily_start_time']} to ${_activeSession!['daily_end_time']})', style: const TextStyle(color: Colors.tealAccent, fontWeight: FontWeight.bold)),
+                    ] else ...[
+                      const SizedBox(height: 4),
+                      Text('Active Window: ${DateTime.parse(_activeSession!['start_time']).toLocal().hour}:${DateTime.parse(_activeSession!['start_time']).toLocal().minute.toString().padLeft(2, '0')} to ${DateTime.parse(_activeSession!['expires_at']).toLocal().hour}:${DateTime.parse(_activeSession!['expires_at']).toLocal().minute.toString().padLeft(2, '0')}', style: const TextStyle(color: Colors.blueGrey)),
                     ],
                   ],
                 ),
@@ -1396,7 +1526,31 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                   final profile = a['profiles'] as Map<String, dynamic>;
                   final checkIn = DateTime.parse(a['check_in']).toLocal();
                   final checkOutRaw = a['check_out'];
-                  final checkOut = checkOutRaw != null ? DateTime.parse(checkOutRaw).toLocal() : null;
+                  
+                  DateTime? checkOut;
+                  bool isAutoChecked = false;
+                  
+                  if (checkOutRaw != null) {
+                    checkOut = DateTime.parse(checkOutRaw).toLocal();
+                  } else {
+                    final now = DateTime.now();
+                    if (_activeSession!['is_recurring'] == true) {
+                      final endParts = _activeSession!['daily_end_time'].split(':');
+                      final endH = int.parse(endParts[0]);
+                      final endM = int.parse(endParts[1]);
+                      final limit = DateTime(checkIn.year, checkIn.month, checkIn.day, endH, endM);
+                      if (now.isAfter(limit)) {
+                        checkOut = limit;
+                        isAutoChecked = true;
+                      }
+                    } else {
+                      final limit = DateTime.parse(_activeSession!['expires_at']).toLocal();
+                      if (now.isAfter(limit)) {
+                        checkOut = limit;
+                        isAutoChecked = true;
+                      }
+                    }
+                  }
 
                   return Card(
                     child: Padding(
@@ -1409,9 +1563,9 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                             children: [
                               Text(profile['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                               Text(
-                                checkOut != null ? 'Completed' : 'Active',
+                                checkOut != null ? (isAutoChecked ? 'Auto Closed' : 'Completed') : 'Active',
                                 style: TextStyle(
-                                  color: checkOut != null ? Colors.grey : Colors.greenAccent,
+                                  color: checkOut != null ? (isAutoChecked ? Colors.orange : Colors.grey) : Colors.greenAccent,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
@@ -1427,7 +1581,12 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                             children: [
                               Text('In: ${checkIn.hour}:${checkIn.minute.toString().padLeft(2, '0')}', style: const TextStyle(fontSize: 12)),
                               if (checkOut != null)
-                               Text('Out: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}', style: const TextStyle(fontSize: 12, color: Colors.redAccent))
+                               Text(
+                                 isAutoChecked 
+                                     ? 'Auto Out: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}'
+                                     : 'Out: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}', 
+                                 style: TextStyle(fontSize: 12, color: isAutoChecked ? Colors.orangeAccent : Colors.redAccent)
+                               )
                             ],
                           ),
                         ],
@@ -1504,7 +1663,30 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
                                   final profile = attendee['profiles'] as Map<String, dynamic>;
                                   final inTime = DateTime.parse(attendee['check_in']).toLocal();
                                   final outTimeRaw = attendee['check_out'];
-                                  final outTime = outTimeRaw != null ? DateTime.parse(outTimeRaw).toLocal() : null;
+                                  
+                                  DateTime? outTime;
+                                  bool autoOut = false;
+                                  if (outTimeRaw != null) {
+                                    outTime = DateTime.parse(outTimeRaw).toLocal();
+                                  } else {
+                                    final now = DateTime.now();
+                                    if (session['is_recurring'] == true) {
+                                      final endParts = session['daily_end_time'].split(':');
+                                      final endH = int.parse(endParts[0]);
+                                      final endM = int.parse(endParts[1]);
+                                      final limit = DateTime(inTime.year, inTime.month, inTime.day, endH, endM);
+                                      if (now.isAfter(limit)) {
+                                        outTime = limit;
+                                        autoOut = true;
+                                      }
+                                    } else {
+                                      final limit = DateTime.parse(session['expires_at']).toLocal();
+                                      if (now.isAfter(limit)) {
+                                        outTime = limit;
+                                        autoOut = true;
+                                      }
+                                    }
+                                  }
 
                                   return Card(
                                     margin: const EdgeInsets.only(bottom: 8.0),
@@ -1516,7 +1698,7 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
                                           Text(profile['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold)),
                                           Text('Email: ${profile['email'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
                                           Text('Gender: ${profile['gender'] ?? ''} • Dept: ${profile['department'] ?? ''} • Level: ${profile['level'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                          Text('In: ${inTime.hour}:${inTime.minute.toString().padLeft(2, '0')}${outTime != null ? ' | Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}' : ''}', style: TextStyle(color: Theme.of(context).colorScheme.primary, fontSize: 12)),
+                                          Text('In: ${inTime.hour}:${inTime.minute.toString().padLeft(2, '0')}${outTime != null ? (autoOut ? ' | Auto Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}' : ' | Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}') : ''}', style: TextStyle(color: autoOut ? Colors.orangeAccent : Theme.of(context).colorScheme.primary, fontSize: 12)),
                                         ],
                                       ),
                                     ),
@@ -1575,7 +1757,11 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
                   child: Icon(Icons.school, color: Theme.of(context).colorScheme.primary),
                 ),
                 title: Text(s['title'] ?? 'Session', style: const TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: Text('Date: ${created.year}-${created.month.toString().padLeft(2, '0')}-${created.day.toString().padLeft(2, '0')} • Method: ${s['auth_type'].toString().toUpperCase()}'),
+                subtitle: Text(
+                  s['is_recurring'] == true
+                      ? 'Recurring: Mon-Fri (${s['daily_start_time']} - ${s['daily_end_time']})'
+                      : 'Date: ${created.year}-${created.month.toString().padLeft(2, '0')}-${created.day.toString().padLeft(2, '0')} (${DateTime.parse(s['start_time']).toLocal().hour}:${DateTime.parse(s['start_time']).toLocal().minute.toString().padLeft(2, '0')} - ${DateTime.parse(s['expires_at']).toLocal().hour}:${DateTime.parse(s['expires_at']).toLocal().minute.toString().padLeft(2, '0')})'
+                ),
                 trailing: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [

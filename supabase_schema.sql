@@ -136,8 +136,13 @@ create table if not exists public.attendance_sessions (
   -- BLE Config
   ble_uuid uuid,
   is_active boolean default true,
-  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-  expires_at timestamp with time zone not null
+  -- Scheduling Config
+  is_recurring boolean default false,
+  daily_start_time text, -- format "HH:MM", e.g., "08:00"
+  daily_end_time text,   -- format "HH:MM", e.g., "17:00"
+  start_time timestamp with time zone default timezone('utc'::text, now()) not null,
+  expires_at timestamp with time zone not null,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
 -- Enable RLS for attendance_sessions
