@@ -1347,7 +1347,12 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
   }
 
   Future<void> _startSession() async {
-    if (_titleController.text.trim().isEmpty) return;
+    if (_titleController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a session title'), backgroundColor: Colors.orangeAccent),
+      );
+      return;
+    }
     setState(() => _isPublishing = true);
 
     try {
