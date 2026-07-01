@@ -188,6 +188,7 @@ create table if not exists public.attendances (
   session_id uuid references public.attendance_sessions(id) on delete cascade not null,
   check_in timestamp with time zone default timezone('utc'::text, now()) not null,
   check_out timestamp with time zone,
+  last_seen timestamp with time zone default timezone('utc'::text, now()) not null,
   date date default current_date not null,
   unique (student_id, session_id, date)
 );

@@ -601,6 +601,7 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
   bool _checkedIn = false;
   Map<String, dynamic>? _attendanceRecord;
   StreamSubscription<List<ScanResult>>? _scanSub;
+  Timer? _heartbeatTimer;
 
   @override
   void initState() {
@@ -611,6 +612,7 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
   @override
   void dispose() {
     _scanSub?.cancel();
+    _heartbeatTimer?.cancel();
     super.dispose();
   }
 
@@ -626,9 +628,7 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
           for (final item in data) {
             if (item['is_active'] == true) {
               if (item['is_recurring'] == true) {
-                // Check if working day (Mon - Fri)
                 if (now.weekday >= 1 && now.weekday <= 5) {
-                  // Check daily time window
                   final currentMinutes = now.hour * 60 + now.minute;
                   final startParts = item['daily_start_time'].split(':');
                   final startMinutes = int.parse(startParts[0]) * 60 + int.parse(startParts[1]);
@@ -641,7 +641,6 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
                   }
                 }
               } else {
-                // One-time session
                 final start = DateTime.parse(item['start_time']);
                 final expires = DateTime.parse(item['expires_at']);
                 if (now.isAfter(start) && now.isBefore(expires)) {
@@ -664,6 +663,7 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
               _inGpsRange = false;
               _inBleRange = false;
             });
+            _stopHeartbeat();
           }
         });
   }
@@ -684,12 +684,44 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         _checkedIn = true;
         _attendanceRecord = res;
       });
+      _startHeartbeat();
     } else {
       setState(() {
         _checkedIn = false;
         _attendanceRecord = null;
       });
+      _stopHeartbeat();
     }
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(minutes: 1), (timer) async {
+      if (!_checkedIn || _attendanceRecord == null || _activeSession == null) {
+        timer.cancel();
+        return;
+      }
+      
+      // Perform hardware range checks dynamically
+      await _runRangeChecks();
+      
+      final bool withinRange = _inGpsRange && _inBleRange;
+      if (withinRange) {
+        // Still in location range, update heartbeat seen timestamp
+        try {
+          await supabase.from('attendances').update({
+            'last_seen': DateTime.now().toIso8601String(),
+          }).eq('id', _attendanceRecord!['id']);
+        } catch (e) {
+          // Ignored
+        }
+      }
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
   }
 
   Future<void> _runRangeChecks() async {
@@ -785,12 +817,14 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         'student_id': user!.id,
         'session_id': _activeSession!['id'],
         'check_in': DateTime.now().toIso8601String(),
+        'last_seen': DateTime.now().toIso8601String(),
       }).select().single();
 
       setState(() {
         _checkedIn = true;
         _attendanceRecord = res;
       });
+      _startHeartbeat();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Successfully Checked In!')));
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: $e'), backgroundColor: Colors.redAccent));
@@ -808,6 +842,7 @@ class _StudentCheckInTabState extends State<StudentCheckInTab> {
         _checkedIn = false;
         _activeSession = null;
       });
+      _stopHeartbeat();
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Successfully Checked Out!')));
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: $e'), backgroundColor: Colors.redAccent));
@@ -956,32 +991,46 @@ class StudentHistoryTab extends StatelessWidget {
             final session = log['attendance_sessions'] as Map<String, dynamic>;
             final checkInTime = DateTime.parse(log['check_in']).toLocal();
             final checkOutTimeRaw = log['check_out'];
+            final lastSeenTime = DateTime.parse(log['last_seen']).toLocal();
             
             DateTime? checkOutTime;
             bool isAutoCheckedOut = false;
+            bool isLastSeenOut = false;
             
             if (checkOutTimeRaw != null) {
               checkOutTime = DateTime.parse(checkOutTimeRaw).toLocal();
             } else {
-              // Calculate Auto Check-out if session active time has expired for that day
               final now = DateTime.now();
+              DateTime sessionEndTimeToday;
+              
               if (session['is_recurring'] == true) {
                 final endParts = session['daily_end_time'].split(':');
                 final endHour = int.parse(endParts[0]);
                 final endMin = int.parse(endParts[1]);
-                
-                final sessionEndTimeToday = DateTime(checkInTime.year, checkInTime.month, checkInTime.day, endHour, endMin);
-                if (now.isAfter(sessionEndTimeToday)) {
+                sessionEndTimeToday = DateTime(checkInTime.year, checkInTime.month, checkInTime.day, endHour, endMin);
+              } else {
+                sessionEndTimeToday = DateTime.parse(session['expires_at']).toLocal();
+              }
+              
+              if (now.isAfter(sessionEndTimeToday)) {
+                // If they never checked out and left the location before it ended:
+                // lastSeen represents the exact latest moment they were in range.
+                // We check if lastSeen is before the session end time.
+                if (lastSeenTime.isBefore(sessionEndTimeToday)) {
+                  checkOutTime = lastSeenTime;
+                  isLastSeenOut = true;
+                } else {
                   checkOutTime = sessionEndTimeToday;
                   isAutoCheckedOut = true;
                 }
-              } else {
-                final expires = DateTime.parse(session['expires_at']).toLocal();
-                if (now.isAfter(expires)) {
-                  checkOutTime = expires;
-                  isAutoCheckedOut = true;
-                }
               }
+            }
+
+            String statusLabel = 'Active';
+            Color statusColor = Colors.orangeAccent;
+            if (checkOutTime != null) {
+              statusColor = isLastSeenOut ? Colors.blueGrey : (isAutoCheckedOut ? Colors.orange : Colors.greenAccent);
+              statusLabel = isLastSeenOut ? 'Left Location' : (isAutoCheckedOut ? 'Auto Closed' : 'Completed');
             }
 
             return Card(
@@ -1000,19 +1049,21 @@ class StudentHistoryTab extends StatelessWidget {
                     Text('Check In: ${checkInTime.hour}:${checkInTime.minute.toString().padLeft(2, '0')}'),
                     if (checkOutTime != null)
                       Text(
-                        isAutoCheckedOut 
-                            ? 'Auto Checked Out: ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}'
-                            : 'Check Out: ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}', 
-                        style: TextStyle(color: isAutoCheckedOut ? Colors.orangeAccent : Colors.blueGrey, fontWeight: isAutoCheckedOut ? FontWeight.bold : FontWeight.normal)
+                        isLastSeenOut
+                            ? 'Last Seen (Auto Out): ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}'
+                            : (isAutoCheckedOut
+                                ? 'Auto Checked Out: ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}'
+                                : 'Check Out: ${checkOutTime.hour}:${checkOutTime.minute.toString().padLeft(2, '0')}'), 
+                        style: TextStyle(color: statusColor, fontWeight: FontWeight.bold)
                       )
                     else
                       const Text('Check Out: Pending', style: TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold)),
                   ],
                 ),
                 trailing: Text(
-                  checkOutTime != null ? (isAutoCheckedOut ? 'Auto Closed' : 'Completed') : 'Active',
+                  statusLabel,
                   style: TextStyle(
-                    color: checkOutTime != null ? (isAutoCheckedOut ? Colors.orange : Colors.greenAccent) : Colors.orangeAccent,
+                    color: statusColor,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -1255,7 +1306,7 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
     try {
       final res = await supabase
           .from('attendances')
-          .select('check_in, check_out, profiles(*)')
+          .select('check_in, check_out, last_seen, profiles(*)')
           .eq('session_id', _activeSession!['id']);
       setState(() {
         _attendees = res;
@@ -1343,12 +1394,12 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
         dailyStart = '${_startTime.hour.toString().padLeft(2, '0')}:${_startTime.minute.toString().padLeft(2, '0')}';
         dailyEnd = '${_endTime.hour.toString().padLeft(2, '0')}:${_endTime.minute.toString().padLeft(2, '0')}';
         startTime = now;
-        expiresTime = now.add(const Duration(days: 365)); // 1 year duration
+        expiresTime = now.add(const Duration(days: 365));
       } else {
         startTime = DateTime(now.year, now.month, now.day, _startTime.hour, _startTime.minute);
         expiresTime = DateTime(now.year, now.month, now.day, _endTime.hour, _endTime.minute);
         if (expiresTime.isBefore(startTime)) {
-          expiresTime = expiresTime.add(const Duration(days: 1)); // Next day
+          expiresTime = expiresTime.add(const Duration(days: 1));
         }
       }
 
@@ -1487,7 +1538,7 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      mainAxisAlignment: Main => MainAxisAlignment.spaceBetween,
                       children: [
                         Expanded(
                           child: Text(
@@ -1526,30 +1577,43 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                   final profile = a['profiles'] as Map<String, dynamic>;
                   final checkIn = DateTime.parse(a['check_in']).toLocal();
                   final checkOutRaw = a['check_out'];
+                  final lastSeenTime = DateTime.parse(a['last_seen']).toLocal();
                   
                   DateTime? checkOut;
                   bool isAutoChecked = false;
+                  bool isLastSeenOut = false;
                   
                   if (checkOutRaw != null) {
                     checkOut = DateTime.parse(checkOutRaw).toLocal();
                   } else {
                     final now = DateTime.now();
+                    DateTime limit;
+                    
                     if (_activeSession!['is_recurring'] == true) {
                       final endParts = _activeSession!['daily_end_time'].split(':');
                       final endH = int.parse(endParts[0]);
                       final endM = int.parse(endParts[1]);
-                      final limit = DateTime(checkIn.year, checkIn.month, checkIn.day, endH, endM);
-                      if (now.isAfter(limit)) {
-                        checkOut = limit;
-                        isAutoChecked = true;
-                      }
+                      limit = DateTime(checkIn.year, checkIn.month, checkIn.day, endH, endM);
                     } else {
-                      final limit = DateTime.parse(_activeSession!['expires_at']).toLocal();
-                      if (now.isAfter(limit)) {
+                      limit = DateTime.parse(_activeSession!['expires_at']).toLocal();
+                    }
+                    
+                    if (now.isAfter(limit)) {
+                      if (lastSeenTime.isBefore(limit)) {
+                        checkOut = lastSeenTime;
+                        isLastSeenOut = true;
+                      } else {
                         checkOut = limit;
                         isAutoChecked = true;
                       }
                     }
+                  }
+
+                  String subStatus = 'Active';
+                  Color subColor = Colors.greenAccent;
+                  if (checkOut != null) {
+                    subColor = isLastSeenOut ? Colors.orangeAccent : (isAutoChecked ? Colors.orange : Colors.grey);
+                    subStatus = isLastSeenOut ? 'Left Location' : (isAutoChecked ? 'Auto Closed' : 'Completed');
                   }
 
                   return Card(
@@ -1563,9 +1627,9 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                             children: [
                               Text(profile['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                               Text(
-                                checkOut != null ? (isAutoChecked ? 'Auto Closed' : 'Completed') : 'Active',
+                                subStatus,
                                 style: TextStyle(
-                                  color: checkOut != null ? (isAutoChecked ? Colors.orange : Colors.grey) : Colors.greenAccent,
+                                  color: subColor,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
@@ -1582,10 +1646,12 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
                               Text('In: ${checkIn.hour}:${checkIn.minute.toString().padLeft(2, '0')}', style: const TextStyle(fontSize: 12)),
                               if (checkOut != null)
                                Text(
-                                 isAutoChecked 
-                                     ? 'Auto Out: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}'
-                                     : 'Out: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}', 
-                                 style: TextStyle(fontSize: 12, color: isAutoChecked ? Colors.orangeAccent : Colors.redAccent)
+                                 isLastSeenOut
+                                     ? 'Last Seen: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}'
+                                     : (isAutoChecked 
+                                         ? 'Auto Out: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}'
+                                         : 'Out: ${checkOut.hour}:${checkOut.minute.toString().padLeft(2, '0')}'), 
+                                 style: TextStyle(fontSize: 12, color: subColor)
                                )
                             ],
                           ),
@@ -1634,7 +1700,7 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
             return FutureBuilder<List<dynamic>>(
               future: supabase
                   .from('attendances')
-                  .select('check_in, check_out, profiles(*)')
+                  .select('check_in, check_out, last_seen, profiles(*)')
                   .eq('session_id', session['id']),
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
@@ -1663,28 +1729,47 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
                                   final profile = attendee['profiles'] as Map<String, dynamic>;
                                   final inTime = DateTime.parse(attendee['check_in']).toLocal();
                                   final outTimeRaw = attendee['check_out'];
+                                  final lastSeenTime = DateTime.parse(attendee['last_seen']).toLocal();
                                   
                                   DateTime? outTime;
                                   bool autoOut = false;
+                                  bool lastSeenOut = false;
                                   if (outTimeRaw != null) {
                                     outTime = DateTime.parse(outTimeRaw).toLocal();
                                   } else {
                                     final now = DateTime.now();
+                                    DateTime limit;
                                     if (session['is_recurring'] == true) {
                                       final endParts = session['daily_end_time'].split(':');
                                       final endH = int.parse(endParts[0]);
                                       final endM = int.parse(endParts[1]);
-                                      final limit = DateTime(inTime.year, inTime.month, inTime.day, endH, endM);
-                                      if (now.isAfter(limit)) {
-                                        outTime = limit;
-                                        autoOut = true;
-                                      }
+                                      limit = DateTime(inTime.year, inTime.month, inTime.day, endH, endM);
                                     } else {
-                                      final limit = DateTime.parse(session['expires_at']).toLocal();
-                                      if (now.isAfter(limit)) {
+                                      limit = DateTime.parse(session['expires_at']).toLocal();
+                                    }
+                                    
+                                    if (now.isAfter(limit)) {
+                                      if (lastSeenTime.isBefore(limit)) {
+                                        outTime = lastSeenTime;
+                                        lastSeenOut = true;
+                                      } else {
                                         outTime = limit;
                                         autoOut = true;
                                       }
+                                    }
+                                  }
+
+                                  String infoSuffix = '';
+                                  Color txtColor = Theme.of(context).colorScheme.primary;
+                                  if (outTime != null) {
+                                    if (lastSeenOut) {
+                                      txtColor = Colors.orangeAccent;
+                                      infoSuffix = ' | Left Location: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
+                                    } else if (autoOut) {
+                                      txtColor = Colors.orange;
+                                      infoSuffix = ' | Auto Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
+                                    } else {
+                                      infoSuffix = ' | Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}';
                                     }
                                   }
 
@@ -1698,7 +1783,7 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
                                           Text(profile['name'] ?? 'Unknown', style: const TextStyle(fontWeight: FontWeight.bold)),
                                           Text('Email: ${profile['email'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
                                           Text('Gender: ${profile['gender'] ?? ''} • Dept: ${profile['department'] ?? ''} • Level: ${profile['level'] ?? ''}', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                                          Text('In: ${inTime.hour}:${inTime.minute.toString().padLeft(2, '0')}${outTime != null ? (autoOut ? ' | Auto Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}' : ' | Out: ${outTime.hour}:${outTime.minute.toString().padLeft(2, '0')}') : ''}', style: TextStyle(color: autoOut ? Colors.orangeAccent : Theme.of(context).colorScheme.primary, fontSize: 12)),
+                                          Text('In: ${inTime.hour}:${inTime.minute.toString().padLeft(2, '0')}$infoSuffix', style: TextStyle(color: txtColor, fontSize: 12)),
                                         ],
                                       ),
                                     ),
