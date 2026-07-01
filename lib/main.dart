@@ -1684,30 +1684,38 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
   List<dynamic> _members = [];
   List<dynamic> _attendances = [];
 
+  // Search & Filter state variables
+  String _searchQuery = '';
+  DateTime? _selectedDate;
+  final _searchController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
     _fetchReportData();
   }
 
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
   Future<void> _fetchReportData() async {
     setState(() => _loading = true);
     try {
-      // 1. Fetch all sessions in the organization
       final sessionsRes = await supabase
           .from('attendance_sessions')
           .select('*, attendances(count)')
           .eq('organization_id', widget.organization['id'])
           .order('created_at', ascending: false);
 
-      // 2. Fetch all members in the organization
       final membersRes = await supabase
           .from('organization_members')
           .select('*, profiles(*)')
           .eq('organization_id', widget.organization['id'])
           .eq('role', 'member');
 
-      // 3. Fetch all attendances for the organization's sessions
       final attendancesRes = await supabase
           .from('attendances')
           .select('*, profiles(*)');
@@ -1763,7 +1771,7 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
                               bool autoOut = false;
                               bool lastSeenOut = false;
                               if (outTimeRaw != null) {
-                                outTime = DateTime.parse(outTimeRaw).toLocal();
+                                  outTime = DateTime.parse(outTimeRaw).toLocal();
                               } else {
                                 final now = DateTime.now();
                                 DateTime limit;
@@ -1834,6 +1842,24 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    // 1. Local filtering of sessions by date
+    final filteredSessions = _sessions.where((s) {
+      if (_selectedDate == null) return true;
+      final created = DateTime.parse(s['created_at']).toLocal();
+      return created.year == _selectedDate!.year &&
+          created.month == _selectedDate!.month &&
+          created.day == _selectedDate!.day;
+    }).toList();
+
+    // 2. Local filtering of students (members) by Name or Email
+    final filteredMembers = _members.where((m) {
+      final profile = m['profiles'] as Map<String, dynamic>;
+      final name = (profile['name'] ?? '').toString().toLowerCase();
+      final email = (profile['email'] ?? '').toString().toLowerCase();
+      final query = _searchQuery.toLowerCase();
+      return name.contains(query) || email.contains(query);
+    }).toList();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Reports', style: TextStyle(fontSize: 18)),
@@ -1860,18 +1886,102 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
                 ],
               ),
             )
-          : _isExcelMode
-              ? _buildExcelReport()
-              : _buildListReport(),
+          : Column(
+              children: [
+                _buildSearchFilterBar(),
+                Expanded(
+                  child: _isExcelMode
+                      ? _buildExcelReport(filteredSessions, filteredMembers)
+                      : _buildListReport(filteredSessions),
+                ),
+              ],
+            ),
     );
   }
 
-  Widget _buildListReport() {
+  Widget _buildSearchFilterBar() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Search name or gmail...',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _searchQuery.isNotEmpty
+                    ? IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() {
+                            _searchQuery = '';
+                          });
+                        },
+                      )
+                    : null,
+                contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              onChanged: (val) {
+                setState(() {
+                  _searchQuery = val;
+                });
+              },
+            ),
+          ),
+          const SizedBox(width: 12),
+          OutlinedButton.icon(
+            onPressed: () async {
+              if (_selectedDate != null) {
+                setState(() {
+                  _selectedDate = null;
+                });
+              } else {
+                final picked = await showDatePicker(
+                  context: context,
+                  initialDate: DateTime.now(),
+                  firstDate: DateTime(2020),
+                  lastDate: DateTime(2100),
+                );
+                if (picked != null) {
+                  setState(() {
+                    _selectedDate = picked;
+                  });
+                }
+              }
+            },
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            icon: Icon(_selectedDate != null ? Icons.date_range_rounded : Icons.calendar_month),
+            label: Text(
+              _selectedDate != null
+                  ? '${_selectedDate!.year}-${_selectedDate!.month.toString().padLeft(2, '0')}-${_selectedDate!.day.toString().padLeft(2, '0')}'
+                  : 'Filter Date',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildListReport(List<dynamic> filteredSessions) {
+    if (filteredSessions.isEmpty) {
+      return const Center(child: Text('No matching sessions for this date.', style: TextStyle(color: Colors.grey)));
+    }
+
     return ListView.builder(
       padding: const EdgeInsets.all(16.0),
-      itemCount: _sessions.length,
+      itemCount: filteredSessions.length,
       itemBuilder: (context, index) {
-        final s = _sessions[index];
+        final s = filteredSessions[index];
         final created = DateTime.parse(s['created_at']).toLocal();
         final count = s['attendances'] != null && s['attendances'].isNotEmpty
             ? s['attendances'][0]['count']
@@ -1905,7 +2015,14 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
     );
   }
 
-  Widget _buildExcelReport() {
+  Widget _buildExcelReport(List<dynamic> filteredSessions, List<dynamic> filteredMembers) {
+    if (filteredMembers.isEmpty) {
+      return const Center(child: Text('No students match your search.', style: TextStyle(color: Colors.grey)));
+    }
+    if (filteredSessions.isEmpty) {
+      return const Center(child: Text('No sessions match the selected date.', style: TextStyle(color: Colors.grey)));
+    }
+
     return Padding(
       padding: const EdgeInsets.all(8.0),
       child: Card(
@@ -1928,128 +2045,125 @@ class _AdminReportsTabState extends State<AdminReportsTab> {
               ),
             ),
             Expanded(
-              child: _members.isEmpty
-                  ? const Center(child: Text('No students joined this group yet.', style: TextStyle(color: Colors.grey)))
-                  : SingleChildScrollView(
-                      scrollDirection: Axis.vertical,
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: DataTable(
-                          columnSpacing: 24,
-                          headingRowHeight: 48,
-                          dataRowMinHeight: 48,
-                          dataRowMaxHeight: 52,
-                          headingRowColor: MaterialStateProperty.all(
-                            Theme.of(context).colorScheme.primary.withAlpha(12),
+              child: SingleChildScrollView(
+                scrollDirection: Axis.vertical,
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: DataTable(
+                    columnSpacing: 24,
+                    headingRowHeight: 48,
+                    dataRowMinHeight: 48,
+                    dataRowMaxHeight: 52,
+                    headingRowColor: MaterialStateProperty.all(
+                      Theme.of(context).colorScheme.primary.withAlpha(12),
+                    ),
+                    border: TableBorder.all(
+                      color: Theme.of(context).dividerColor.withAlpha(51),
+                      width: 1,
+                    ),
+                    columns: [
+                      const DataColumn(
+                        label: Text(
+                          'Student Name',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        ),
+                      ),
+                      ...filteredSessions.map((session) {
+                        return DataColumn(
+                          label: Text(
+                            session['title'] ?? 'Session',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                           ),
-                          border: TableBorder.all(
-                            color: Theme.of(context).dividerColor.withAlpha(51),
-                            width: 1,
-                          ),
-                          columns: [
-                            const DataColumn(
-                              label: Text(
-                                'Student Name',
-                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                              ),
-                            ),
-                            ..._sessions.map((session) {
-                              return DataColumn(
-                                label: Text(
-                                  session['title'] ?? 'Session',
+                        );
+                      }),
+                    ],
+                    rows: filteredMembers.map((member) {
+                      final profile = member['profiles'] as Map<String, dynamic>;
+                      final studentId = member['user_id'];
+                      return DataRow(
+                        cells: [
+                          DataCell(
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  profile['name'] ?? 'Unknown',
                                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                                 ),
-                              );
-                            }),
-                          ],
-                          rows: _members.map((member) {
-                            final profile = member['profiles'] as Map<String, dynamic>;
-                            final studentId = member['user_id'];
-                            return DataRow(
-                              cells: [
-                                DataCell(
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    mainAxisAlignment: MainAxisAlignment.center,
+                                Text(
+                                  profile['email'] ?? '',
+                                  style: const TextStyle(fontSize: 10, color: Colors.grey),
+                                ),
+                              ],
+                            ),
+                          ),
+                          ...filteredSessions.map((session) {
+                            final attendance = _attendances.firstWhere(
+                              (a) => a['student_id'] == studentId && a['session_id'] == session['id'],
+                              orElse: () => null,
+                            );
+
+                            if (attendance != null) {
+                              final checkInTime = DateTime.parse(attendance['check_in']).toLocal();
+                              final timeStr = '${checkInTime.hour}:${checkInTime.minute.toString().padLeft(2, '0')}';
+                              return DataCell(
+                                Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.green.withAlpha(26),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
+                                      const Icon(Icons.check_circle, color: Colors.greenAccent, size: 14),
+                                      const SizedBox(width: 4),
                                       Text(
-                                        profile['name'] ?? 'Unknown',
-                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                                      ),
-                                      Text(
-                                        profile['email'] ?? '',
-                                        style: const TextStyle(fontSize: 10, color: Colors.grey),
+                                        timeStr,
+                                        style: const TextStyle(
+                                          color: Colors.greenAccent,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 11,
+                                        ),
                                       ),
                                     ],
                                   ),
                                 ),
-                                ..._sessions.map((session) {
-                                  // Check attendance for this specific student and session
-                                  final attendance = _attendances.firstWhere(
-                                    (a) => a['student_id'] == studentId && a['session_id'] == session['id'],
-                                    orElse: () => null,
-                                  );
-
-                                  if (attendance != null) {
-                                    final checkInTime = DateTime.parse(attendance['check_in']).toLocal();
-                                    final timeStr = '${checkInTime.hour}:${checkInTime.minute.toString().padLeft(2, '0')}';
-                                    return DataCell(
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                                        decoration: BoxDecoration(
-                                          color: Colors.green.withAlpha(26),
-                                          borderRadius: BorderRadius.circular(4),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            const Icon(Icons.check_circle, color: Colors.greenAccent, size: 14),
-                                            const SizedBox(width: 4),
-                                            Text(
-                                              timeStr,
-                                              style: const TextStyle(
-                                                color: Colors.greenAccent,
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 11,
-                                              ),
-                                            ),
-                                          ],
+                              );
+                            } else {
+                              return DataCell(
+                                Container(
+                                  padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                                  decoration: BoxDecoration(
+                                    color: Colors.red.withAlpha(26),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: const [
+                                      Icon(Icons.cancel, color: Colors.redAccent, size: 14),
+                                      SizedBox(width: 4),
+                                      Text(
+                                        'Absent',
+                                        style: TextStyle(
+                                          color: Colors.redAccent,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 11,
                                         ),
                                       ),
-                                    );
-                                  } else {
-                                    return DataCell(
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                                        decoration: BoxDecoration(
-                                          color: Colors.red.withAlpha(26),
-                                          borderRadius: BorderRadius.circular(4),
-                                        ),
-                                        child: Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: const [
-                                            Icon(Icons.cancel, color: Colors.redAccent, size: 14),
-                                            SizedBox(width: 4),
-                                            Text(
-                                              'Absent',
-                                              style: TextStyle(
-                                                color: Colors.redAccent,
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 11,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                }),
-                              ],
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                    ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }
+                          }),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
             ),
           ],
         ),
