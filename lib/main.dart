@@ -1220,6 +1220,23 @@ class _AdminConsoleTabState extends State<AdminConsoleTab> {
       String? bleUuid;
 
       if (_authType == 'gps' || _authType == 'both') {
+        bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+        if (!serviceEnabled) {
+          throw Exception('Location services are disabled on this device.');
+        }
+
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+          if (permission == LocationPermission.denied) {
+            throw Exception('Location permissions are denied.');
+          }
+        }
+        
+        if (permission == LocationPermission.deniedForever) {
+          throw Exception('Location permissions are permanently denied. Please enable them in settings.');
+        }
+
         final pos = await Geolocator.getCurrentPosition();
         lat = pos.latitude;
         lng = pos.longitude;
